@@ -1,0 +1,23 @@
+# 核心深度学习
+torch>=2.1.0
+torchvision>=0.16.0
+
+# 模型库（EfficientNet 等预训练模型）
+timm>=0.9.12
+
+# 推理部署
+onnx>=1.15.0
+onnxruntime>=1.16.0
+
+# FastAPI 推理服务
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+
+# 图像处理
+Pillow>=10.0.0
+
+# 工具
+tqdm>=4.66.0
+requests>=2.31.0
+numpy>=1.24.0
