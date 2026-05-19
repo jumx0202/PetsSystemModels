@@ -6,6 +6,7 @@
 """
 
 import json
+import sys
 from pathlib import Path
 
 import torch
@@ -16,6 +17,10 @@ import numpy as np
 
 BASE_DIR  = Path(__file__).parent
 MODEL_DIR = BASE_DIR / "models"
+for i, arg in enumerate(sys.argv):
+    if arg == "--model-dir" and i + 1 < len(sys.argv):
+        MODEL_DIR = Path(sys.argv[i + 1]).expanduser().resolve()
+
 META_FILE = MODEL_DIR / "class_meta.json"
 CKPT_PATH = MODEL_DIR / "pet_classifier_best.pth"
 ONNX_PATH = MODEL_DIR / "pet_classifier.onnx"
@@ -51,7 +56,7 @@ def export():
         input_names=["image"],
         output_names=["logits"],
         dynamic_axes={"image": {0: "batch_size"}, "logits": {0: "batch_size"}},
-        opset_version=17,
+        opset_version=18,
         do_constant_folding=True,
     )
     print(f"ONNX 模型已导出：{ONNX_PATH}")
@@ -73,7 +78,14 @@ def export():
     print(f"PyTorch vs ONNX 最大误差：{max_diff:.6f}（< 1e-4 表示正常）")
 
     size_mb = ONNX_PATH.stat().st_size / 1024 / 1024
-    print(f"ONNX 文件大小：{size_mb:.1f} MB")
+    external_data = ONNX_PATH.with_suffix(ONNX_PATH.suffix + ".data")
+    if external_data.exists():
+        data_size_mb = external_data.stat().st_size / 1024 / 1024
+        print(f"ONNX 主文件大小：{size_mb:.1f} MB")
+        print(f"ONNX 外部权重文件：{external_data.name} ({data_size_mb:.1f} MB)")
+        print("部署时需要同时保留 pet_classifier.onnx 和 pet_classifier.onnx.data")
+    else:
+        print(f"ONNX 文件大小：{size_mb:.1f} MB")
     print(f"\n导出完成！下一步：python inference_server.py")
 
 

@@ -48,6 +48,14 @@ START_EPOCH   = PHASE1_EPOCH + 1   # 默认从阶段二第一轮开始
 for i, arg in enumerate(sys.argv):
     if arg == "--start-epoch" and i + 1 < len(sys.argv):
         START_EPOCH = int(sys.argv[i + 1])
+    elif arg == "--data-dir" and i + 1 < len(sys.argv):
+        DATA_DIR = Path(sys.argv[i + 1]).expanduser().resolve()
+    elif arg == "--model-dir" and i + 1 < len(sys.argv):
+        MODEL_DIR = Path(sys.argv[i + 1]).expanduser().resolve()
+
+CKPT_BEST     = MODEL_DIR / "pet_classifier_best.pth"
+CKPT_RESUME   = MODEL_DIR / "pet_classifier_resume.pth"
+META_FILE     = MODEL_DIR / "class_meta.json"
 
 # ── 设备 ─────────────────────────────────────────────
 if torch.backends.mps.is_available():
@@ -90,6 +98,31 @@ def build_loaders(batch_size: int):
         len(train_ds.classes),
         train_ds.classes,
     )
+
+
+def infer_class_type(class_name: str) -> str:
+    cat_breeds = {
+        "Abyssinian", "Bengal", "Birman", "Bombay", "British_Shorthair",
+        "Egyptian_Mau", "Maine_Coon", "Persian", "Ragdoll",
+        "Russian_Blue", "Siamese", "Sphynx",
+    }
+    return "cat" if class_name in cat_breeds else "dog"
+
+
+def save_class_meta(class_names: list[str]):
+    class_to_idx = {cls: i for i, cls in enumerate(class_names)}
+    idx_to_class = {str(i): cls for cls, i in class_to_idx.items()}
+    class_type = {cls: infer_class_type(cls) for cls in class_names}
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    with open(META_FILE, "w", encoding="utf-8") as f:
+        json.dump({
+            "class_to_idx": class_to_idx,
+            "idx_to_class": idx_to_class,
+            "class_type": class_type,
+            "num_classes": len(class_names),
+            "data_dir": str(DATA_DIR),
+        }, f, ensure_ascii=False, indent=2)
+    print(f"类别元数据已保存：{META_FILE}")
 
 
 def run_epoch(model, loader, criterion, optimizer=None):
@@ -137,7 +170,8 @@ def main():
         print(f"{'='*55}")
 
         # 用阶段二的 batch size 重建 loader
-        train_ld, val_ld, test_ld, num_classes, _ = build_loaders(BATCH_SIZE_P2)
+        train_ld, val_ld, test_ld, num_classes, class_names = build_loaders(BATCH_SIZE_P2)
+        save_class_meta(class_names)
         print(f"类别数：{num_classes} | Batch Size（阶段二）：{BATCH_SIZE_P2}")
 
         # 优先从完整快照恢复，否则从最佳模型加载权重
@@ -163,8 +197,8 @@ def main():
             print(f"  ✓ 从完整快照恢复（Epoch {ckpt['epoch']}，best_val={best_val_acc:.4f}）")
         elif CKPT_BEST.exists():
             model.load_state_dict(torch.load(CKPT_BEST, map_location=DEVICE))
-            best_val_acc = 0.9201   # Epoch 5 记录的值，手动填入
-            print(f"  ✓ 从最佳模型权重加载（val_acc={best_val_acc:.4f}）")
+            best_val_acc = 0.0
+            print(f"  ✓ 从最佳模型权重加载")
             print(f"  ! 优化器/调度器状态未恢复，lr 从 {PHASE2_LR} 重新开始")
         else:
             print("[错误] 未找到任何可用的检查点，请先完成阶段一训练")
@@ -211,6 +245,7 @@ def main():
     # 正常模式：从头训练
     # ────────────────────────────────────────────────
     train_ld, val_ld, test_ld, num_classes, class_names = build_loaders(BATCH_SIZE_P1)
+    save_class_meta(class_names)
     print(f"类别数：{num_classes} | Batch Size（阶段一）：{BATCH_SIZE_P1}")
 
     model     = timm.create_model(MODEL_NAME, pretrained=True, num_classes=num_classes).to(DEVICE)
