@@ -1,14 +1,22 @@
 """
-推理服务：FastAPI + ONNX Runtime
-提供宠物品种识别 HTTP 接口，供 Spring Boot 后端调用
+统一 AI 推理服务：FastAPI
 
-运行：python inference_server.py
-接口：POST http://localhost:8000/api/recognize  (form-data, field: file)
+提供两类能力，供 Spring Boot 后端调用：
+1. 品种识别 1.1（140 类，默认）：POST /api/recognize
+2. PetFace-ID 2.0 个体识别：POST /api/petface/embed, POST /api/petface/verify
+
+运行：
+    python inference_server.py
+
+如需切回 1.0 模型（37 类），可手动指定：
+    PET_BREED_MODEL_DIR=models python inference_server.py
 """
 
 import io
 import json
+import os
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from PIL import Image
@@ -17,10 +25,23 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
+from petface.petface_model import (
+    ModelConfig,
+    build_transform as build_petface_transform,
+    cosine_similarity,
+    embed_image,
+    load_model as load_petface_model,
+)
+
 BASE_DIR  = Path(__file__).parent
-MODEL_DIR = BASE_DIR / "models"
+MODEL_DIR = Path(os.environ.get("PET_BREED_MODEL_DIR", BASE_DIR / "models_extended")).expanduser().resolve()
 ONNX_PATH = MODEL_DIR / "pet_classifier.onnx"
 META_FILE = MODEL_DIR / "class_meta.json"
+
+PETFACE_MODEL_DIR = Path(os.environ.get("PETFACE_MODEL_DIR", BASE_DIR / "models" / "petface")).expanduser().resolve()
+PETFACE_CHECKPOINT = Path(os.environ.get("PETFACE_CHECKPOINT", PETFACE_MODEL_DIR / "petface_id_best.pth")).expanduser().resolve()
+PETFACE_META_FILE = Path(os.environ.get("PETFACE_META", PETFACE_MODEL_DIR / "petface_meta.json")).expanduser().resolve()
+PETFACE_THRESHOLD = float(os.environ.get("PETFACE_THRESHOLD", "0.75"))
 
 IMG_SIZE = 380
 MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -39,6 +60,41 @@ with open(META_FILE, encoding="utf-8") as f:
 
 IDX_TO_CLASS: dict[int, str] = {int(k): v for k, v in _meta["idx_to_class"].items()}
 CLASS_TYPE:   dict[str, str] = _meta["class_type"]
+
+
+def _load_petface_meta() -> dict[str, Any]:
+    if PETFACE_META_FILE.exists():
+        with open(PETFACE_META_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "model_version": "PetFace-ID-2.0",
+        "model_name": "hf-hub:BVRA/MegaDescriptor-B-224",
+        "img_size": 224,
+        "embed_dim": 512,
+    }
+
+
+PETFACE_META = _load_petface_meta()
+PETFACE_MODEL = None
+PETFACE_DEVICE = None
+PETFACE_TRANSFORM = None
+PETFACE_LOAD_ERROR: str | None = None
+
+if PETFACE_CHECKPOINT.exists():
+    try:
+        PETFACE_MODEL, PETFACE_DEVICE = load_petface_model(
+            ModelConfig(
+                model_name=os.environ.get("PETFACE_MODEL_NAME", PETFACE_META.get("model_name", "hf-hub:BVRA/MegaDescriptor-B-224")),
+                img_size=int(os.environ.get("PETFACE_IMG_SIZE", PETFACE_META.get("img_size", 224))),
+                embed_dim=int(os.environ.get("PETFACE_EMBED_DIM", PETFACE_META.get("embed_dim", 512))),
+                checkpoint=str(PETFACE_CHECKPOINT),
+            )
+        )
+        PETFACE_TRANSFORM = build_petface_transform(int(os.environ.get("PETFACE_IMG_SIZE", PETFACE_META.get("img_size", 224))))
+    except Exception as exc:  # noqa: BLE001 - health endpoint exposes this for deployment diagnosis.
+        PETFACE_LOAD_ERROR = str(exc)
+else:
+    PETFACE_LOAD_ERROR = f"未找到 PetFace 模型：{PETFACE_CHECKPOINT}"
 
 # 中文品种名映射（论文展示友好）
 BREED_CN: dict[str, str] = {
@@ -82,7 +138,7 @@ BREED_CN: dict[str, str] = {
 }
 
 # ── FastAPI 应用 ────────────────────────────────────────
-app = FastAPI(title="宠物识别服务", version="1.0.0")
+app = FastAPI(title="宠物统一 AI 识别服务", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -91,7 +147,7 @@ app.add_middleware(
 )
 
 
-def preprocess(image_bytes: bytes) -> np.ndarray:
+def preprocess_breed_image(image_bytes: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img = img.resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
     arr = np.array(img, dtype=np.float32) / 255.0
@@ -104,13 +160,42 @@ def softmax(x: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
-@app.post("/api/recognize")
-async def recognize(file: UploadFile = File(..., description="宠物图片（jpg/png）")):
+async def read_image_upload(file: UploadFile) -> Image.Image:
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="请上传图片文件（jpg 或 png）")
+    data = await file.read()
+    try:
+        return Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="图片读取失败，请确认文件格式正确") from exc
 
-    data    = await file.read()
-    inp     = preprocess(data)
+
+async def read_image_bytes(file: UploadFile) -> bytes:
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="请上传图片文件（jpg 或 png）")
+    return await file.read()
+
+
+def ensure_petface_loaded() -> None:
+    if PETFACE_MODEL is None or PETFACE_DEVICE is None or PETFACE_TRANSFORM is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"PetFace 2.0 模型未加载：{PETFACE_LOAD_ERROR or 'unknown error'}",
+        )
+
+
+def petface_confidence_level(similarity: float) -> str:
+    if similarity >= PETFACE_THRESHOLD:
+        return "high"
+    if similarity >= 0.60:
+        return "medium"
+    return "low"
+
+
+@app.post("/api/recognize")
+async def recognize(file: UploadFile = File(..., description="宠物图片（jpg/png）")):
+    data    = await read_image_bytes(file)
+    inp     = preprocess_breed_image(data)
     logits  = SESSION.run(["logits"], {"image": inp})[0][0]
     probs   = softmax(logits)
 
@@ -142,12 +227,66 @@ async def recognize(file: UploadFile = File(..., description="宠物图片（jpg
     }
 
 
+@app.post("/api/petface/embed")
+async def petface_embed(file: UploadFile = File(..., description="宠物图片（jpg/png）")):
+    ensure_petface_loaded()
+    image = await read_image_upload(file)
+    emb = embed_image(PETFACE_MODEL, image, PETFACE_TRANSFORM, PETFACE_DEVICE)
+    return {
+        "code": 200,
+        "message": "特征提取成功",
+        "data": {
+            "model_version": PETFACE_META.get("model_version", "PetFace-ID-2.0"),
+            "model_name": PETFACE_META.get("model_name", "hf-hub:BVRA/MegaDescriptor-B-224"),
+            "embedding_dim": int(emb.shape[0]),
+            "embedding": emb.round(6).tolist(),
+            "norm": round(float(np.linalg.norm(emb)), 6),
+        },
+    }
+
+
+@app.post("/api/petface/verify")
+async def petface_verify(
+    file1: UploadFile = File(..., description="第一张宠物图片（jpg/png）"),
+    file2: UploadFile = File(..., description="第二张宠物图片（jpg/png）"),
+):
+    ensure_petface_loaded()
+    image1 = await read_image_upload(file1)
+    image2 = await read_image_upload(file2)
+    emb1 = embed_image(PETFACE_MODEL, image1, PETFACE_TRANSFORM, PETFACE_DEVICE)
+    emb2 = embed_image(PETFACE_MODEL, image2, PETFACE_TRANSFORM, PETFACE_DEVICE)
+    similarity = cosine_similarity(emb1, emb2)
+    return {
+        "code": 200,
+        "message": "验证完成",
+        "data": {
+            "same_pet": similarity >= PETFACE_THRESHOLD,
+            "similarity": round(similarity, 4),
+            "threshold": PETFACE_THRESHOLD,
+            "confidence_level": petface_confidence_level(similarity),
+            "model_version": PETFACE_META.get("model_version", "PetFace-ID-2.0"),
+        },
+    }
+
+
 @app.get("/health")
 def health():
     return {
-        "status":      "ok",
-        "model":       ONNX_PATH.name,
-        "num_classes": len(IDX_TO_CLASS),
+        "status": "ok",
+        "breed": {
+            "loaded": True,
+            "model": ONNX_PATH.name,
+            "num_classes": len(IDX_TO_CLASS),
+        },
+        "petface": {
+            "loaded": PETFACE_MODEL is not None,
+            "model": PETFACE_META.get("model_name", "hf-hub:BVRA/MegaDescriptor-B-224"),
+            "model_version": PETFACE_META.get("model_version", "PetFace-ID-2.0"),
+            "embedding_dim": PETFACE_META.get("embed_dim", 512),
+            "checkpoint": str(PETFACE_CHECKPOINT),
+            "device": str(PETFACE_DEVICE) if PETFACE_DEVICE is not None else None,
+            "error": PETFACE_LOAD_ERROR,
+        },
     }
 
 

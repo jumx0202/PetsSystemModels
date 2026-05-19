@@ -1,3 +1,10 @@
 /models/
 /data_raw/
 /dataset/
+/models_extended/
+/model_backups/
+/dataset_extended/
+/reports/
+*.log
+__pycache__/
+.DS_Store
