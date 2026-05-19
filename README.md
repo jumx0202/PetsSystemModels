@@ -1,56 +1,181 @@
-# AI 统一识别模块 (AI Recognition)
+# AI 统一识别模块
 
-本项目是宠物管理系统（毕业设计）的 AI 识别子模块。当前模块已经由单一“品种识别 1.0”升级为统一 FastAPI 模型服务，同时承载：
+本仓库是宠物管理系统的 Python AI 服务端，当前已经从单一“宠物品种识别 1.0”升级为统一 FastAPI 推理服务，同时承载：
 
-- **品种识别 1.0**：识别猫狗品种，接口为 `POST /api/recognize`。
-- **PetFace-ID 2.0 个体识别**：提取宠物个体特征、判断两张图片是否为同一只宠物，接口为 `POST /api/petface/embed` 与 `POST /api/petface/verify`。
+- **品种识别 1.0**：Oxford-IIIT Pet，37 类猫狗品种。
+- **品种识别 1.1 增强版**：扩展到 140 类，其中猫 20 类、狗 120 类。
+- **PetFace-ID 2.0 个体识别**：输出 512 维宠物个体特征，用于同宠验证与 AI 寻宠相似检索。
 
-该模块以独立服务形式运行，通过 HTTP 接口向 Spring Boot 后端提供推理结果。
+Spring Boot 后端通过 HTTP 调用本服务，前端不直接访问 Python 服务。
 
-## 目录结构与功能
+## 目录结构
 
-整个 AI 模型的训练与推理流程被拆分为多个步骤，分别对应不同的脚本文件：
+```text
+ai_recognition/
+├── 01_download_dataset.py          # 下载 Oxford-IIIT Pet 数据
+├── 02_prepare_data.py              # 构建原版 37 类数据集
+├── 03_train.py                     # 品种识别训练脚本，支持 dataset / dataset_extended
+├── 04_export_onnx.py               # 导出品种识别 ONNX
+├── 05_test_server.py               # 旧版接口测试脚本
+├── 06_download_stanford_dogs.py    # 下载 Stanford Dogs 数据
+├── 07_build_extended_dataset.py    # 构建 140 类扩展数据集
+├── inference_server.py             # 统一 FastAPI 服务
+├── petface/                        # PetFace 2.0 模型加载、推理、评估相关代码
+├── scripts/
+│   ├── smoke_test_ai_service.py    # 统一服务冒烟测试
+│   └── evaluate_petface2_offline.py# PetFace 离线评估脚本
+├── models/                         # 1.0 模型与 PetFace 2.0 模型，需单独传输
+├── models_extended/                # 1.1 增强版模型，需单独传输
+├── dataset/                        # 原版数据集，训练用，不提交 Git
+└── dataset_extended/               # 扩展版数据集，训练用，不提交 Git
+```
 
-- **01_download_dataset.py**：用于下载并解压宠物品种数据集。
-- **02_prepare_data.py**：数据集预处理，包括图像清洗、尺寸调整和划分训练/验证集。
-- **03_train.py**：使用 PyTorch 训练图像分类模型，基于预训练模型进行微调（Fine-tuning），保存 `.pth` 权重文件。
-- **04_export_onnx.py**：将训练好的 PyTorch 模型导出为 ONNX 格式（`pet_classifier.onnx`），以提升后续推理的性能与部署便利性。
-- **05_test_server.py**：用于测试推理服务接口的脚本。
-- **inference_server.py**：统一推理服务端。基于 FastAPI，提供品种识别与 PetFace 个体识别接口。
-- **petface/**：PetFace-ID 2.0 推理相关代码。
-- **models/**：存放训练出的 PyTorch 权重（`.pth`）、ONNX 模型文件（`.onnx`）以及类别映射配置（`class_meta.json`）。
-- **models/petface/**：存放 PetFace-ID 2.0 最佳模型与元信息。
-- **AI品种识别技术总结.md** & **行为分析方案.md**：技术方案、算法原理和实现细节的总结文档，适合用于论文撰写参考。
+## 当前模型版本
 
-## 当前进度
+### 品种识别 1.0
 
-目前 AI 识别模块已经完成了从数据准备到模型部署的 **全流程闭环**：
-1. **数据准备与训练 (已完成)**：数据集处理、模型训练和验证均已完成，效果最好的权重已经保存在 `models/` 目录下。
-2. **模型转换 (已完成)**：1.0 模型已成功导出为 `pet_classifier.onnx`，为轻量化、高性能推理做好了准备。
-3. **PetFace 2.0 (已完成训练并接入统一服务)**：最佳模型已保存到 `models/petface/petface_id_best.pth`，统一服务可输出 512 维个体特征。
-4. **推理服务 (已完成 Python 端合并)**：`inference_server.py` 对外暴露 8000 端口，可同时处理品种识别和个体识别。
-5. **前后端联调 (下一阶段)**：后续 Spring Boot 后端将接入 PetFace embedding 保存、同宠验证和相似宠物检索。
+- 数据集：Oxford-IIIT Pet Dataset
+- 类别数：37
+- 任务：猫狗品种分类
+- 部署文件：
 
-## 扩展版品种数据集
+```text
+models/pet_classifier.onnx
+models/pet_classifier.onnx.data
+models/class_meta.json
+```
 
-原始 1.0 版本使用 Oxford-IIIT Pet Dataset，共 37 个猫狗品种。为了增强毕业设计的模型任务难度与覆盖范围，当前已新增 Stanford Dogs Dataset 与 Kaggle CatBreedsRefined-7k 作为扩展数据源，并构建了扩展版训练集：
+### 品种识别 1.1 增强版
 
-- 原始数据集：Oxford-IIIT Pet Dataset，37 类，约 7.4k 张图。
-- 新增数据集：Stanford Dogs Dataset，120 个犬种，约 20.6k 张图。
-- 新增数据集：Kaggle CatBreedsRefined-7k，20 个猫品种，7000 张图，License 为 CC-BY-SA-4.0。
-- 扩展后数据集：`dataset_extended/`，共 140 类，其中猫 20 类、狗 120 类。
-- 数据规模：train 27550 张，val 3401 张，test 3544 张。
-- 重复/同义品种已合并，例如 `basset` 合并为 `basset_hound`，`leonberg` 合并为 `leonberger`，`soft_coated_wheaten_terrier` 合并为 `wheaten_terrier`。
-- 猫品种重复/同义类别已合并，例如 `British Shorthair` 合并为 `British_Shorthair`，`Egyptian Mau` 合并为 `Egyptian_Mau`，`Maine Coon` 合并为 `Maine_Coon`。
-- 新增猫品种包括 `American_Bobtail`、`American_Curl`、`American_Shorthair`、`Exotic_Shorthair`、`Manx`、`Norwegian_Forest`、`Scottish_Fold`、`Turkish_Angora`。
-- 默认排除了 `dingo`、`dhole`、`african_hunting_dog` 等野生犬科类别，使任务更贴近宠物品种识别。
+- 数据集：Oxford-IIIT Pet + Stanford Dogs + Kaggle CatBreedsRefined-7k
+- 类别数：140
+- 猫：20 类
+- 狗：120 类
+- 训练规模：train 27550 张，val 3401 张，test 3544 张
+- 部署文件：
 
-相关脚本：
+```text
+models_extended/pet_classifier.onnx
+models_extended/pet_classifier.onnx.data
+models_extended/class_meta.json
+```
 
-- `06_download_stanford_dogs.py`：下载并解压 Stanford Dogs Dataset。
-- `07_build_extended_dataset.py`：将 Oxford-IIIT Pet、Stanford Dogs 与 Kaggle CatBreedsRefined-7k 合并为 `dataset_extended/`。
+### PetFace-ID 2.0
 
-复现扩展数据集：
+- 数据集：PetFace
+- 任务：宠物个体识别，而不是品种分类
+- 能力：
+  - 为宠物档案生成 embedding
+  - 判断两张图是否可能是同一只宠物
+  - 在系统已建档宠物中检索相似个体
+- 部署文件：
+
+```text
+models/petface/petface_id_best.pth
+models/petface/petface_meta.json
+```
+
+## 运行环境
+
+建议使用 conda 环境：
+
+```bash
+conda create -n pet python=3.11
+conda activate pet
+pip install -r requirements.txt
+```
+
+Apple Silicon 本地运行时建议：
+
+```bash
+export KMP_DUPLICATE_LIB_OK=TRUE
+```
+
+## 启动服务
+
+默认启动时加载 `models/` 下的 1.0 品种识别模型：
+
+```bash
+cd ai_recognition
+conda activate pet
+export KMP_DUPLICATE_LIB_OK=TRUE
+python inference_server.py
+```
+
+推荐演示/部署时加载 1.1 增强版模型：
+
+```bash
+cd ai_recognition
+conda activate pet
+export KMP_DUPLICATE_LIB_OK=TRUE
+PET_BREED_MODEL_DIR=models_extended python inference_server.py
+```
+
+服务地址：
+
+```text
+http://localhost:8000
+```
+
+健康检查：
+
+```bash
+curl http://localhost:8000/health
+```
+
+期望：
+
+```text
+breed.loaded = true
+petface.loaded = true
+petface.embedding_dim = 512
+```
+
+## API 接口
+
+### 品种识别
+
+```text
+POST /api/recognize
+form-data: file
+```
+
+返回宠物类型、Top1 品种、中文品种名和 Top5 候选。
+
+### PetFace 特征提取
+
+```text
+POST /api/petface/embed
+form-data: file
+```
+
+返回 512 维归一化 embedding。
+
+### PetFace 同宠验证
+
+```text
+POST /api/petface/verify
+form-data: file1, file2
+```
+
+返回两张图的余弦相似度、是否同宠、置信等级。
+
+## 训练与导出
+
+### 训练 1.1 增强版品种识别
+
+```bash
+cd ai_recognition
+python 03_train.py --data-dir dataset_extended --model-dir models_extended
+```
+
+训练完成后导出 ONNX：
+
+```bash
+python 04_export_onnx.py --model-dir models_extended
+```
+
+### 构建扩展数据集
 
 ```bash
 cd ai_recognition
@@ -60,122 +185,63 @@ kaggle datasets download -d doctrinek/catbreedsrefined-7k -p data_raw/kaggle_cat
 python 07_build_extended_dataset.py --force
 ```
 
-训练扩展版模型：
+## 测试
 
-```bash
-cd ai_recognition
-python 03_train.py --data-dir dataset_extended --model-dir models_extended
-```
-
-导出扩展版 ONNX：
-
-```bash
-cd ai_recognition
-python 04_export_onnx.py --model-dir models_extended
-```
-
-启动扩展版推理服务：
-
-```bash
-cd ai_recognition
-PET_BREED_MODEL_DIR=models_extended python inference_server.py
-```
-
-## PetFace-ID 2.0 模型
-
-PetFace-ID 2.0 当前使用 PetFace 数据集训练，核心任务是个体识别，而不是品种分类。它可以用于：
-
-- 用户登记宠物时，为宠物头像或照片生成 embedding。
-- 用户上传走失/发现宠物图片时，与系统中已登记宠物进行相似检索。
-- 判断两张图片是否可能属于同一只宠物。
-
-当前模型文件：
-
-```text
-models/petface/petface_id_best.pth
-models/petface/petface_meta.json
-```
-
-为了避免模型丢失，另有本地备份：
-
-```text
-model_backups/petface_pet_species_full_continue_20260518/
-```
-
-## 如何运行统一服务
-
-若要在本地启动 AI 识别服务，请确保已安装 `requirements.txt` 中的依赖，然后运行：
-
-```bash
-cd ai_recognition
-export KMP_DUPLICATE_LIB_OK=TRUE
-python inference_server.py
-```
-
-服务将在 `http://localhost:8000` 启动。
-
-默认会加载旧版 37 类 ONNX：
-
-```text
-models/pet_classifier.onnx
-```
-
-如果要使用扩展版 140 类模型，需要先等训练完成并导出 ONNX：
-
-```bash
-cd ai_recognition
-python 04_export_onnx.py --model-dir models_extended
-```
-
-然后启动时指定：
-
-```bash
-cd ai_recognition
-export KMP_DUPLICATE_LIB_OK=TRUE
-PET_BREED_MODEL_DIR=models_extended python inference_server.py
-```
-
-## 统一服务接口
-
-健康检查：
-
-```bash
-curl http://localhost:8000/health
-```
-
-品种识别 1.0：
-
-```text
-POST /api/recognize
-form-data: file
-```
-
-PetFace 特征提取 2.0：
-
-```text
-POST /api/petface/embed
-form-data: file
-```
-
-PetFace 同宠验证 2.0：
-
-```text
-POST /api/petface/verify
-form-data: file1, file2
-```
-
-## Smoke Test
-
-启动服务后，可以运行：
+### 统一服务冒烟测试
 
 ```bash
 cd ai_recognition
 python scripts/smoke_test_ai_service.py --image "data_raw/images/Abyssinian_1.jpg"
 ```
 
-期望结果：
+### PetFace 2.0 离线评估
 
-- `/health` 中 `breed.loaded=true`
-- `/health` 中 `petface.loaded=true`
-- `petface embed` 的 `embedding_dim=512`
-- 同一张图片验证时 `same_pet=true`，`similarity` 接近 `1.0`
+示例：
+
+```bash
+python scripts/evaluate_petface2_offline.py \
+  --petface-root "/Volumes/ORGOS - Data/PetFaceWorkspace/ai_petface/data/PetFace" \
+  --animals dog cat \
+  --tasks closed_loop \
+  --checkpoint models/petface/petface_id_best.pth \
+  --device mps \
+  --batch-size 16 \
+  --max-closed-loop-identities 500 \
+  --out reports/petface2_closed_loop_quick.json
+```
+
+## 与系统集成
+
+当前 Python 服务已经被 Spring Boot 后端接入：
+
+- 发布领养/寻宠时，后端可调用 `/api/recognize` 辅助填写宠物种类和品种。
+- 宠物建档后，后端调用 `/api/petface/embed` 生成个体特征并写入数据库。
+- AI 寻宠时，后端将上传图片转为 embedding，与数据库中所有已建档宠物进行相似检索。
+
+完整部署资产说明见后端仓库：
+
+```text
+backEnd/docs/部署资产同步说明_20260519.md
+```
+
+当前完整部署资产包：
+
+```text
+deploy_packages/pets_deploy_assets_20260519.zip
+```
+
+## Git 注意事项
+
+以下内容体积较大或包含运行时资产，不提交 Git：
+
+```text
+models/
+models_extended/
+model_backups/
+data_raw/
+dataset/
+dataset_extended/
+reports/
+*.log
+```
+

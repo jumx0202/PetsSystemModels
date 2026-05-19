@@ -1,13 +1,22 @@
 # 宠物品种识别模块技术总结
 
 > 项目路径：`pets/ai_recognition/`  
-> 完成状态：模型训练完成，ONNX 导出与推理服务待部署
+> 当前状态：1.0 原版模型保留，1.1 增强版模型已完成训练与 ONNX 导出，并已接入统一 FastAPI 推理服务
 
 ---
 
+## 版本说明
+
+| 版本 | 任务 | 数据集 | 类别数 | 当前用途 |
+| --- | --- | --- | --- | --- |
+| 1.0 | 猫狗品种识别 | Oxford-IIIT Pet | 37 类 | 保留为原版模型与论文工作量基线 |
+| 1.1 | 增强版猫狗品种识别 | Oxford-IIIT Pet + Stanford Dogs + Kaggle CatBreedsRefined-7k | 140 类 | 当前推荐部署的品种识别模型 |
+
+本文前半部分保留 1.0 原版模型的完整训练设计和结果，后续新增 1.1 增强版说明。PetFace-ID 2.0 属于“宠物个体识别”任务，不是品种识别任务，已整合到统一 FastAPI 服务中，用于 AI 寻宠和同宠验证。
+
 ## 一、数据集选择
 
-### 选用数据集：Oxford-IIIT Pet Dataset
+### 1.0 选用数据集：Oxford-IIIT Pet Dataset
 
 | 项目 | 内容 |
 |------|------|
@@ -80,6 +89,75 @@
 - **公开可复现**：有大量已发表的准确率数字可与本项目对比
 
 ---
+
+## 一补充、1.1 增强版数据集
+
+为了提高毕业设计模型任务难度，避免仅 37 类分类显得过于简单，1.1 版本将训练集扩展为 140 类：
+
+| 数据来源 | 内容 | 规模 |
+| --- | --- | --- |
+| Oxford-IIIT Pet | 原版猫狗品种数据 | 37 类，约 7.4k 张 |
+| Stanford Dogs | 犬种扩展数据 | 120 个犬种，约 20.6k 张 |
+| Kaggle CatBreedsRefined-7k | 猫种扩展数据 | 20 个猫品种，约 7k 张 |
+
+扩展后数据划分：
+
+```text
+dataset_extended/
+├── train/  27550 张
+├── val/     3401 张
+└── test/    3544 张
+```
+
+最终类别构成：
+
+```text
+总类别：140
+猫：20 类
+狗：120 类
+```
+
+数据合并策略：
+
+- Oxford 与 Stanford 中重复犬种进行合并，例如 `basset` 合并为 `basset_hound`，`leonberg` 合并为 `leonberger`。
+- Oxford 与 Kaggle 中重复猫种进行合并，例如 `British Shorthair` 合并为 `British_Shorthair`。
+- 排除 `dingo`、`dhole`、`african_hunting_dog` 等野生犬科类别，使任务更贴近宠物管理系统。
+- 排除笼统的 `Cat`、`Dog` 总称目录，避免把“物种名称”误当作“品种类别”。
+
+相关脚本：
+
+```text
+06_download_stanford_dogs.py
+07_build_extended_dataset.py
+03_train.py
+04_export_onnx.py
+```
+
+训练命令：
+
+```bash
+python 03_train.py --data-dir dataset_extended --model-dir models_extended
+```
+
+导出命令：
+
+```bash
+python 04_export_onnx.py --model-dir models_extended
+```
+
+部署文件：
+
+```text
+models_extended/pet_classifier.onnx
+models_extended/pet_classifier.onnx.data
+models_extended/class_meta.json
+```
+
+启动增强版推理：
+
+```bash
+PET_BREED_MODEL_DIR=models_extended python inference_server.py
+```
 
 ## 二、数据预处理
 
